@@ -7,6 +7,7 @@ and records the halting ones.
 import zlib
 import itertools
 import sys
+import argparse
 
 MAGIC = b"TLSBZ1"
 TRITS_PER_BYTE = 6
@@ -18,7 +19,7 @@ MAX_INPUT = 10
 
 # Vocabulary: common rationals useful in TIP programs.
 # Extend this list to widen the search.
-VOCAB = [
+DEFAULT_VOCAB = [
     "H",      # halt/zero
     "2", "3", "4", "8", "16",
     "1/2", "1/3", "1/4",
@@ -112,30 +113,79 @@ def make_carrier_image(behaviour):
 def main():
     import json
     import hashlib
-    import os
     from pathlib import Path
 
-    max_len = int(sys.argv[1]) if len(sys.argv) > 1 else 4
+    parser = argparse.ArgumentParser(
+        description="Enumerate halting TIP programs that fit the 9x9 budget."
+    )
+    parser.add_argument("max_length", nargs="?", type=int, default=4)
+    parser.add_argument(
+        "--vocab",
+        type=str,
+        default=",".join(DEFAULT_VOCAB),
+        help="Comma-separated command vocabulary, e.g. H,2,1/2,1/3",
+    )
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=0,
+        help="Stop after this many unique behaviors (0 = no limit).",
+    )
+    parser.add_argument(
+        "--max-combos",
+        type=int,
+        default=0,
+        help="Stop after this many candidate combos checked (0 = no limit).",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=MAX_STEPS,
+        help="Interpreter step cap per input/program check.",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append new behaviors to existing programs/index instead of rebuilding from scratch.",
+    )
+    args = parser.parse_args()
+
+    max_len = args.max_length
+    vocab = [v.strip() for v in args.vocab.split(",") if v.strip()]
+    if not vocab:
+        raise ValueError("Vocabulary cannot be empty")
 
     seen = set()
     results = []
 
-    total = sum(len(VOCAB) ** l for l in range(1, max_len + 1))
+    total = sum(len(vocab) ** l for l in range(1, max_len + 1))
     checked = 0
 
+    print(
+        f"Searching lengths 1..{max_len} with {len(vocab)} commands "
+        f"({total} combos max)",
+        file=sys.stderr,
+    )
+
     for length in range(1, max_len + 1):
-        for combo in itertools.product(VOCAB, repeat=length):
+        for combo in itertools.product(vocab, repeat=length):
             checked += 1
             if checked % 10000 == 0:
                 print(f"  {checked}/{total} checked, {len(results)} found...",
                       file=sys.stderr)
+            if args.max_combos and checked > args.max_combos:
+                print(
+                    f"Reached --max-combos={args.max_combos}, stopping early.",
+                    file=sys.stderr,
+                )
+                break
 
             src = source_of(combo)
             if not fits(src):
                 continue
 
             # Compute behaviour vector: outputs for inputs 0..MAX_INPUT
-            behaviour = tuple(run_tip(list(combo), input_value=i)
+            behaviour = tuple(run_tip(list(combo), input_value=i, max_steps=args.max_steps)
                               for i in range(MAX_INPUT + 1))
 
             # Must halt for all inputs
@@ -148,21 +198,51 @@ def main():
             seen.add(behaviour)
 
             results.append((src.strip(), behaviour))
+            if args.max_results and len(results) >= args.max_results:
+                print(
+                    f"Reached --max-results={args.max_results}, stopping early.",
+                    file=sys.stderr,
+                )
+                break
+        else:
+            continue
+        break
 
     # Create output directories
     prog_dir = Path("programs")
     prog_dir.mkdir(exist_ok=True)
     enc_dir = Path("encoded_programs")
     enc_dir.mkdir(exist_ok=True)
+    index_path = prog_dir / "index.json"
+
+    index = []
+    existing_ids = set()
+    if args.append and index_path.exists():
+        try:
+            index = json.loads(index_path.read_text())
+            for entry in index:
+                beh = tuple(entry.get("behavior", []))
+                if beh:
+                    seen.add(beh)
+                entry_id = entry.get("id")
+                if entry_id:
+                    existing_ids.add(entry_id)
+            print(
+                f"Loaded {len(index)} existing entries from {index_path}.",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"Warning: could not load existing index: {e}", file=sys.stderr)
 
     print(f"\nFound {len(results)} unique halting programs in 9x9 budget.\n")
     print(f"Saving to {prog_dir}/ and {enc_dir}/ ...", file=sys.stderr)
 
-    index = []
     for i, (src, beh) in enumerate(sorted(results, key=lambda x: x[1])):
         src_id = hashlib.md5(src.encode()).hexdigest()[:8]
         beh_str = "".join(str(b) for b in beh)
         filename = f"0x{beh_str}{src_id}"
+        if filename in existing_ids:
+            continue
         
         # Save .tip file
         tip_path = prog_dir / f"{filename}.tip"
@@ -199,13 +279,13 @@ def main():
             "source_bytes": len(src),
             "compressed_bytes": len(zlib.compress(src.encode(), level=9))
         })
+        existing_ids.add(filename)
         
         print(f"[{beh_map}]")
         print(src[:60] + ("..." if len(src) > 60 else ""))
         print()
 
     # Save index
-    index_path = prog_dir / "index.json"
     index_path.write_text(json.dumps(index, indent=2))
     print(f"\nSaved {len(index)} programs and index to {prog_dir}/", file=sys.stderr)
     print(f"Encoded images in {enc_dir}/", file=sys.stderr)
