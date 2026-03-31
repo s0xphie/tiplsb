@@ -2,14 +2,14 @@
 
 Usage:
 python tiplsb.py <imagefile>
-    Decode a TIP program hidden in <imagefile> and execute it.
+    Decode and execute a TIP program hidden in <imagefile>.
 
 python tiplsb.py <input_image> <tip_source_file> <output_image>
     Encode TIP source into <input_image> and write a stego image.
 
-Modern TIP format:
-    Source files contain commands only.
-    Initial instruction pointer is always 1.
+TIP format:
+    One command per line. Initial instruction pointer is always 1.
+    Lines containing H are halt (zero) commands. Blank lines are ignored.
 """
 
 import sys
@@ -62,25 +62,24 @@ def _decode_payload_bytes(raw_bytes):
     return bytes(out)
 
 
-def _decode_tip_source(raw_bytes):
+def _decode_source(raw_bytes):
     payload = _decode_payload_bytes(raw_bytes)
     if not payload.startswith(COMPRESSED_MAGIC):
         raise ValueError("Invalid or unsupported payload format")
 
     compressed = payload[len(COMPRESSED_MAGIC) :]
-    payload = zlib.decompress(compressed)
-
-    return payload.decode("utf-8")
+    return zlib.decompress(compressed).decode("utf-8")
 
 
-def _encode_tip_source(tip_source):
-    compressed = zlib.compress(tip_source.encode("utf-8"), level=9)
+def _encode_source(source):
+    compressed = zlib.compress(source.encode("utf-8"), level=9)
     payload = COMPRESSED_MAGIC + compressed
     symbols = []
     for byte in payload:
         symbols.extend(_byte_to_trits(byte))
     symbols.append(END_MARKER)
     return symbols
+
 
 
 def _as_fraction(line):
@@ -119,8 +118,8 @@ def _read_tip_input_line():
     return line
 
 
-def run_tip_source(source, max_steps=DEFAULT_MAX_STEPS):
-    lines = source.splitlines()
+def run_tip_source(tip_source, max_steps=DEFAULT_MAX_STEPS):
+    lines = tip_source.splitlines()
     ip = Fraction(1)
     program = []
     for line in lines:
@@ -143,7 +142,7 @@ def run_tip_source(source, max_steps=DEFAULT_MAX_STEPS):
     input_defined = input_line is not None
     input_value = input_line
 
-    last_ci = Fraction(1, 2)
+    last_ci = -1
     output = 0
     program_len = len(program)
     steps = 0
@@ -158,8 +157,8 @@ def run_tip_source(source, max_steps=DEFAULT_MAX_STEPS):
         if eip < 0:
             input_value = _perl_decrement(input_value)
 
-        ci = eip % program_len
-        cmd = program[int(ci)]
+        ci = int(eip % program_len)
+        cmd = program[ci]
         print(
             f"IP {eip}: running command: {cmd} (index {ci} of program)",
             file=sys.stderr,
@@ -179,17 +178,16 @@ def run_tip_source(source, max_steps=DEFAULT_MAX_STEPS):
 
 def run(image_path):
     image = Image.open(image_path)
-    tip_source = _decode_tip_source(image.tobytes())
-    run_tip_source(tip_source)
+    run_tip_source(_decode_source(image.tobytes()))
 
 
-def enc(input_image_path, tip_source, output_image_path):
+def enc(input_image_path, source, output_image_path):
     image = Image.open(input_image_path)
     data = list(image.tobytes())
-    symbols = _encode_tip_source(tip_source)
+    symbols = _encode_source(source)
 
     if len(symbols) > len(data):
-        raise ValueError("Image is too small to hold TIP source")
+        raise ValueError("Image is too small to hold source")
 
     for i, symbol in enumerate(symbols):
         data[i] = (data[i] // 9) * 9 + symbol
